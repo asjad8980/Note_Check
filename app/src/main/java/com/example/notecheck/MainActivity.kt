@@ -1,6 +1,6 @@
 package com.example.notecheck
 
-
+import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -49,26 +49,64 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import java.util.UUID
 
+// --- LOCAL STORAGE HELPER (PERSISTENCE) ---
+object NoteStorage {
+    private const val PREFS_NAME = "notes_prefs"
+    private const val NOTES_KEY = "saved_notes"
+
+    // Saves the list as a formatted string (ID|Title|IsDone)
+    fun saveNotes(context: Context, notesList: List<TodoItem>) {
+        val sharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val serializedList = notesList.joinToString(";;;") { note ->
+            // Replace newlines with a special placeholder to prevent breaking storage structure
+            val cleanTitle = note.title.replace("\n", "___NEWLINE___")
+            "${note.id}|||${cleanTitle}|||${note.isDone}"
+        }
+        sharedPreferences.edit().putString(NOTES_KEY, serializedList).apply()
+    }
+
+    // Loads the saved notes from memory on startup
+    fun loadNotes(context: Context): List<TodoItem> {
+        val sharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val savedData = sharedPreferences.getString(NOTES_KEY, null) ?: return emptyList()
+
+        if (savedData.isBlank()) return emptyList()
+
+        return try {
+            savedData.split(";;;").mapNotNull { itemString ->
+                val parts = itemString.split("|||")
+                if (parts.size == 3) {
+                    val id = parts[0]
+                    val title = parts[1].replace("___NEWLINE___", "\n")
+                    val isDone = parts[2].toBoolean()
+                    TodoItem(id = id, title = title, isDone = isDone)
+                } else null
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+}
 
 // 1. DATA CLASS (The BluePrint)
-// This object represents one single task.
 data class TodoItem(
-    val id: String = UUID.randomUUID().toString(), // Generates a unique ID
+    val id: String = UUID.randomUUID().toString(),
     val title: String,
-    var isDone: Boolean = false // New state variable
+    var isDone: Boolean = false
 )
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme { // Added a default theme wrapper
+            MaterialTheme {
                 TodoApp()
             }
         }
@@ -78,20 +116,26 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TodoApp() {
+    val context = LocalContext.current
+
     var editingTask by remember { mutableStateOf<TodoItem?>(null) }
-    var isAddingTask by remember { mutableStateOf(false) } // NEW STATE
-    // NEW: State to track which task the user clicked 'Delete' on
+    var isAddingTask by remember { mutableStateOf(false) }
     var taskToDelete by remember { mutableStateOf<TodoItem?>(null) }
 
-    val todoList = remember { mutableStateListOf<TodoItem>() }
+    // --- INITIALIZE LIST FROM STORAGE ---
+    val todoList = remember {
+        mutableStateListOf<TodoItem>().apply {
+            addAll(NoteStorage.loadNotes(context))
+        }
+    }
+
     val selectedIds = remember { mutableStateMapOf<String, Boolean>() }
     val isSelectionMode = remember { derivedStateOf { selectedIds.isNotEmpty() } }.value
 
-    // --- NEW: SEARCH STATE ---
+    // --- SEARCH STATE ---
     var searchQuery by remember { mutableStateOf("") }
 
-    // --- NEW: FILTERED LIST LOGIC ---
-    // This automatically updates the list as you type in the search bar
+    // --- FILTERED LIST LOGIC ---
     val filteredList = remember(searchQuery, todoList.size, todoList.map { it.title + it.isDone }) {
         if (searchQuery.isEmpty()) {
             todoList
@@ -100,22 +144,18 @@ fun TodoApp() {
         }
     }
 
-    // --- SCREEN NAVIGATION LOGIC ---
-
     // --- DELETE CONFIRMATION DIALOG ---
     if (taskToDelete != null) {
         AlertDialog(
-            onDismissRequest = { taskToDelete = null }, // Close if user taps outside
+            onDismissRequest = { taskToDelete = null },
             title = { Text("Delete Note") },
-            //text = { Text("Are you sure you want to delete '${taskToDelete?.title}'?") },
-
-            // We use substringBefore to only show the first line in the popup
             text = { Text("Are you sure you want to delete '${taskToDelete?.title?.substringBefore("\n")}'?") },
             confirmButton = {
                 TextButton(
                     onClick = {
                         todoList.remove(taskToDelete)
-                        taskToDelete = null // Close dialog
+                        NoteStorage.saveNotes(context, todoList) // SAVE CHANGE
+                        taskToDelete = null
                     }
                 ) {
                     Text("Delete", color = Color.Red)
@@ -136,6 +176,7 @@ fun TodoApp() {
                 val index = todoList.indexOfFirst { it.id == editingTask!!.id }
                 if (index != -1) {
                     todoList[index] = todoList[index].copy(title = newTitle)
+                    NoteStorage.saveNotes(context, todoList) // SAVE CHANGE
                 }
                 editingTask = null
             },
@@ -147,6 +188,7 @@ fun TodoApp() {
             onSave = { newTitle ->
                 if (newTitle.isNotBlank()) {
                     todoList.add(TodoItem(title = newTitle))
+                    NoteStorage.saveNotes(context, todoList) // SAVE CHANGE
                 }
                 isAddingTask = false
             },
@@ -157,7 +199,6 @@ fun TodoApp() {
         Scaffold(
             topBar = {
                 TopAppBar(
-                    // 1. ADD THE BACK/CLOSE BUTTON
                     navigationIcon = {
                         if (isSelectionMode) {
                             IconButton(onClick = { selectedIds.clear() }) {
@@ -165,9 +206,8 @@ fun TodoApp() {
                             }
                         }
                     },
-                    title = { //Text("Notes")
+                    title = {
                         if (!isSelectionMode) {
-                            // THE SEARCH BAR
                             TextField(
                                 value = searchQuery,
                                 onValueChange = { searchQuery = it },
@@ -205,19 +245,20 @@ fun TodoApp() {
                                         if (index != -1) todoList[index] = task.copy(isDone = true)
                                     }
                                 }
+                                NoteStorage.saveNotes(context, todoList) // SAVE CHANGE
                                 selectedIds.clear()
                             }) { Icon(Icons.Default.Check, "Done") }
 
                             IconButton(onClick = {
                                 val idsToRemove = selectedIds.keys.toList()
                                 todoList.removeAll { it.id in idsToRemove }
+                                NoteStorage.saveNotes(context, todoList) // SAVE CHANGE
                                 selectedIds.clear()
                             }) { Icon(Icons.Default.Delete, "Delete") }
                         }
                     }
                 )
             },
-            // FLOATING ACTION BUTTON AT BOTTOM RIGHT
             floatingActionButton = {
                 FloatingActionButton(onClick = { isAddingTask = true }) {
                     Icon(Icons.Default.Add, contentDescription = "New Note")
@@ -230,8 +271,6 @@ fun TodoApp() {
                     .padding(innerPadding)
                     .padding(horizontal = 16.dp)
             ) {
-
-
                 items(filteredList) { task ->
                     TaskRow(
                         task = task,
@@ -239,7 +278,10 @@ fun TodoApp() {
                         isInSelectionMode = isSelectionMode,
                         onToggleDone = { updated ->
                             val idx = todoList.indexOf(task)
-                            if (idx != -1) todoList[idx] = updated
+                            if (idx != -1) {
+                                todoList[idx] = updated
+                                NoteStorage.saveNotes(context, todoList) // SAVE CHANGE
+                            }
                         },
                         onDelete = { taskToDelete = task },
                         onLongClick = { if (!isSelectionMode) selectedIds[task.id] = true },
@@ -265,7 +307,7 @@ fun TaskRow(
     onDelete: () -> Unit,
     onLongClick: () -> Unit,
     onSelectToggle: () -> Unit,
-    onEdit: () -> Unit // We still keep this parameter to tell the parent to open the edit screen
+    onEdit: () -> Unit
 ) {
     val backgroundColor by animateColorAsState(
         targetValue = if (task.isDone) Color(0xFFE8F5E9) else MaterialTheme.colorScheme.surface,
@@ -282,7 +324,6 @@ fun TaskRow(
                     if (isInSelectionMode) {
                         onSelectToggle()
                     } else {
-                        // NOW: Tapping the note opens the edit screen
                         onEdit()
                     }
                 },
@@ -307,36 +348,24 @@ fun TaskRow(
                     )
                 }
 
-                /*Text(
-                    text = task.title,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = if (task.isDone) Color.Gray else Color.Black
-                )*/
                 Text(
-                    // Logic: Only show text before the first line break.
-                    // If there is no line break, it shows the whole thing.
                     text = task.title.substringBefore("\n"),
                     style = MaterialTheme.typography.bodyLarge,
                     color = if (task.isDone) Color.Gray else Color.Black,
-                    maxLines = 1, // Ensures it stays on one line in the list
-                    overflow = TextOverflow.Ellipsis // Adds "..." if the line is too long
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
 
-            // Icons on the right side
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // TOGGLE BUTTON: Changes between Check and Close (X)
                 IconButton(onClick = { onToggleDone(task.copy(isDone = !task.isDone)) }) {
                     Icon(
-                        // Logic: If done, show 'Close' (X), else show 'Check'
                         imageVector = if (task.isDone) Icons.Default.Close else Icons.Default.Check,
                         contentDescription = "Toggle Done",
-                        // Logic: If done, make it Red/Gray to signal "Undo", else Green/Gray
                         tint = if (task.isDone) Color.Red else Color.Gray
                     )
                 }
 
-                // Delete button
                 IconButton(onClick = onDelete) {
                     Icon(
                         imageVector = Icons.Default.Delete,
@@ -349,7 +378,6 @@ fun TaskRow(
     }
 }
 
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EditTaskScreen(
@@ -357,7 +385,6 @@ fun EditTaskScreen(
     onSave: (String) -> Unit,
     onCancel: () -> Unit
 ) {
-    // 1. Change state to TextFieldValue to track cursor position
     var textValue by remember {
         mutableStateOf(TextFieldValue(task.title, TextRange(task.title.length)))
     }
@@ -372,7 +399,6 @@ fun EditTaskScreen(
                     }
                 },
                 actions = {
-                    // 2. Use .text to send the string back to the list
                     IconButton(onClick = { onSave(textValue.text) }) {
                         Icon(Icons.Default.Check, "Save", tint = Color(0xFF4CAF50))
                     }
@@ -384,7 +410,6 @@ fun EditTaskScreen(
             TextField(
                 value = textValue,
                 onValueChange = { newValue ->
-                    // 3. Call the smart list helper
                     textValue = handleSmartLists(textValue, newValue)
                 },
                 placeholder = { Text("Start typing...") },
@@ -401,14 +426,12 @@ fun EditTaskScreen(
     }
 }
 
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NewNoteScreen(
     onSave: (String) -> Unit,
     onCancel: () -> Unit
 ) {
-    // Corrected state for a NEW note using TextFieldValue
     var textValue by remember {
         mutableStateOf(TextFieldValue("", TextRange(0)))
     }
@@ -450,17 +473,14 @@ fun NewNoteScreen(
     }
 }
 
-
 fun handleSmartLists(oldValue: TextFieldValue, newValue: TextFieldValue): TextFieldValue {
     val oldText = oldValue.text
     val newText = newValue.text
 
-    // Logic: Only trigger if the user typed exactly one newline character
     if (newText.length == oldText.length + 1 && newText.endsWith('\n')) {
         val lines = oldText.split("\n")
         val lastLine = lines.lastOrNull() ?: ""
 
-        // 1. Handle Numbered List (e.g., "1. Task")
         val numberMatch = Regex("""^(\d+)\.\s+(.+)""").find(lastLine)
         if (numberMatch != null) {
             val nextNum = numberMatch.groupValues[1].toInt() + 1
@@ -469,7 +489,6 @@ fun handleSmartLists(oldValue: TextFieldValue, newValue: TextFieldValue): TextFi
             return TextFieldValue(resultText, TextRange(resultText.length))
         }
 
-        // 2. Handle Bullet List (e.g., "* Task" or "- Task")
         val bulletMatch = Regex("""^([\*\-])\s+(.+)""").find(lastLine)
         if (bulletMatch != null) {
             val symbol = bulletMatch.groupValues[1]
